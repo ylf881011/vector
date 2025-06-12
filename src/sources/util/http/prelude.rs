@@ -1,4 +1,8 @@
-use crate::common::http::{server_auth::HttpServerAuthConfig, ErrorMessage};
+use crate::common::http::{
+    server_auth::HttpServerAuthConfig,
+    ErrorMessage,
+    SuccessResponse,
+};
 use std::{collections::HashMap, convert::Infallible, fmt, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
@@ -74,6 +78,7 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
         cx: SourceContext,
         acknowledgements: SourceAcknowledgementsConfig,
         keepalive_settings: KeepaliveConfig,
+        response_body: bool,
     ) -> crate::Result<crate::sources::Source> {
         let tls = MaybeTlsSettings::from_config(tls, true)?;
         let protocol = tls.http_protocol_name();
@@ -165,7 +170,13 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
                                 events
                             });
 
-                        handle_request(events, acknowledgements, response_code, cx.out.clone())
+                        handle_request(
+                            events,
+                            acknowledgements,
+                            response_code,
+                            response_body,
+                            cx.out.clone(),
+                        )
                     },
                 );
 
@@ -251,6 +262,7 @@ async fn handle_request(
     events: Result<Vec<Event>, ErrorMessage>,
     acknowledgements: bool,
     response_code: StatusCode,
+    response_body: bool,
     mut out: SourceSender,
 ) -> Result<impl warp::Reply, Rejection> {
     match events {
@@ -265,7 +277,7 @@ async fn handle_request(
                     emit!(StreamClosedError { count });
                     warp::reject::custom(RejectShuttingDown)
                 })
-                .and_then(|_| handle_batch_status(response_code, receiver))
+                .and_then(|_| handle_batch_status(response_code, receiver, response_body))
                 .await
         }
         Err(error) => {
@@ -278,11 +290,12 @@ async fn handle_request(
 async fn handle_batch_status(
     success_response_code: StatusCode,
     receiver: Option<BatchStatusReceiver>,
+    response_body: bool,
 ) -> Result<impl warp::Reply, Rejection> {
     match receiver {
-        None => Ok(success_response_code),
+        None => Ok(build_success_reply(success_response_code, response_body)),
         Some(receiver) => match receiver.await {
-            BatchStatus::Delivered => Ok(success_response_code),
+            BatchStatus::Delivered => Ok(build_success_reply(success_response_code, response_body)),
             BatchStatus::Errored => Err(warp::reject::custom(ErrorMessage::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error delivering contents to sink".into(),
@@ -292,5 +305,23 @@ async fn handle_batch_status(
                 "Contents failed to deliver to sink".into(),
             ))),
         },
+    }
+}
+
+fn build_success_reply(code: StatusCode, body: bool) -> warp::reply::Response {
+    if body {
+        warp::reply::with_status(
+            warp::reply::json(&SuccessResponse {
+                data: serde_json::Value::Null,
+                code: code.as_u16(),
+                status: code.as_u16(),
+                msg: "OK".to_string(),
+                error: false,
+            }),
+            code,
+        )
+        .into_response()
+    } else {
+        warp::reply::with_status(warp::reply(), code).into_response()
     }
 }

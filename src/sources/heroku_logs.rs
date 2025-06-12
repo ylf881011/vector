@@ -203,6 +203,7 @@ impl SourceConfig for LogplexConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            false,
         )
     }
 
