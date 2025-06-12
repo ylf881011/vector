@@ -617,19 +617,24 @@ base: components: sources: http_server: configuration: {
 			items: type: string: examples: ["application", "source", "param*", "*"]
 		}
 	}
-	response_code: {
-		description: "Specifies the HTTP response status code that will be returned on successful requests."
-		required:    false
-		type: uint: {
-			default: 200
-			examples: [
-				202,
-			]
-		}
-	}
-	strict_path: {
-		description: """
-			Whether or not to treat the configured `path` as an absolute path.
+        response_code: {
+                description: "Specifies the HTTP response status code that will be returned on successful requests."
+                required:    false
+                type: uint: {
+                        default: 200
+                        examples: [
+                                202,
+                        ]
+                }
+        }
+        response_body: {
+                description: "Include a JSON body in successful responses"
+                required: false
+                type: bool: {}
+        }
+        strict_path: {
+                description: """
+                        Whether or not to treat the configured `path` as an absolute path.
 
 			If set to `true`, only requests using the exact URL path specified in `path` are accepted. Otherwise,
 			requests sent to a URL path that starts with the value of `path` are accepted.

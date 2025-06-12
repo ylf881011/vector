@@ -95,6 +95,7 @@ impl SourceConfig for PrometheusRemoteWriteConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            false,
         )
     }
 
