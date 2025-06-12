@@ -167,6 +167,10 @@ pub struct SimpleHttpConfig {
     #[serde(default, deserialize_with = "bool_or_struct")]
     acknowledgements: SourceAcknowledgementsConfig,
 
+    /// Whether successful requests should include a JSON body in the response.
+    #[serde(default)]
+    response_body: Option<bool>,
+
     /// The namespace to use for logs. This overrides the global setting.
     #[configurable(metadata(docs::hidden))]
     #[serde(default)]
@@ -284,6 +288,7 @@ impl Default for SimpleHttpConfig {
             framing: None,
             decoding: Some(default_decoding()),
             acknowledgements: SourceAcknowledgementsConfig::default(),
+            response_body: None,
             log_namespace: None,
             keepalive: KeepaliveConfig::default(),
         }
@@ -385,6 +390,7 @@ impl SourceConfig for SimpleHttpConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.response_body.unwrap_or(false),
         )
     }
 
@@ -557,7 +563,7 @@ mod tests {
         event::{Event, EventStatus, Value},
         test_util::{
             components::{self, assert_source_compliance, HTTP_PUSH_SOURCE_TAGS},
-            next_addr, spawn_collect_n, wait_for_tcp,
+            next_addr, spawn_collect_n, wait_for_tcp, collect_n,
         },
         SourceSender,
     };
@@ -582,6 +588,7 @@ mod tests {
         strict_path: bool,
         status: EventStatus,
         acknowledgements: bool,
+        response_body: Option<bool>,
         framing: Option<FramingConfig>,
         decoding: Option<DeserializerConfig>,
     ) -> (impl Stream<Item = Event> + 'a, SocketAddr) {
@@ -614,6 +621,7 @@ mod tests {
                 framing,
                 decoding,
                 acknowledgements: acknowledgements.into(),
+                response_body,
                 log_namespace: None,
                 keepalive: Default::default(),
             }
@@ -696,6 +704,18 @@ mod tests {
             .as_u16()
     }
 
+    async fn send_response_body(address: SocketAddr, body: &str) -> (u16, String) {
+        let resp = reqwest::Client::new()
+            .post(format!("http://{address}/"))
+            .body(body.to_owned())
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap();
+        (status, text)
+    }
+
     async fn spawn_ok_collect_n(
         send: impl std::future::Future<Output = u16> + Send + 'static,
         rx: impl Stream<Item = Event> + Unpin,
@@ -721,6 +741,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 None,
             )
@@ -770,6 +791,7 @@ mod tests {
                 true,
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -808,6 +830,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 Some(BytesDecoderConfig::new().into()),
                 None,
             )
@@ -842,6 +865,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 Some(JsonDeserializerConfig::default().into()),
             )
@@ -881,6 +905,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 Some(JsonDeserializerConfig::default().into()),
             )
@@ -927,6 +952,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 Some(JsonDeserializerConfig::default().into()),
             )
@@ -979,6 +1005,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 Some(JsonDeserializerConfig::default().into()),
             )
@@ -1067,6 +1094,7 @@ mod tests {
                 EventStatus::Delivered,
                 true,
                 None,
+                None,
                 Some(JsonDeserializerConfig::default().into()),
             )
             .await;
@@ -1114,6 +1142,7 @@ mod tests {
                 EventStatus::Delivered,
                 true,
                 None,
+                None,
                 Some(JsonDeserializerConfig::default().into()),
             )
             .await;
@@ -1157,6 +1186,7 @@ mod tests {
                 EventStatus::Delivered,
                 true,
                 None,
+                None,
                 Some(JsonDeserializerConfig::default().into()),
             )
             .await;
@@ -1196,6 +1226,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 Some(JsonDeserializerConfig::default().into()),
             )
@@ -1255,6 +1286,7 @@ mod tests {
                 true,
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -1285,6 +1317,7 @@ mod tests {
                 true,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 Some(JsonDeserializerConfig::default().into()),
             )
@@ -1327,6 +1360,7 @@ mod tests {
                 false,
                 EventStatus::Delivered,
                 true,
+                None,
                 None,
                 Some(JsonDeserializerConfig::default().into()),
             )
@@ -1390,6 +1424,7 @@ mod tests {
             EventStatus::Delivered,
             true,
             None,
+            None,
             Some(JsonDeserializerConfig::default().into()),
         )
         .await;
@@ -1417,6 +1452,7 @@ mod tests {
                 true,
                 None,
                 None,
+                None,
             )
             .await;
 
@@ -1434,6 +1470,36 @@ mod tests {
         })
         .await;
     }
+    
+    #[tokio::test]
+    async fn http_success_response_body() {
+        components::init_test();
+        let (rx, addr) = source(
+            vec![],
+            vec![],
+            "http_path",
+            "remote_ip",
+            "/",
+            "POST",
+            StatusCode::OK,
+            None,
+            true,
+            EventStatus::Delivered,
+            true,
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let send_handle = tokio::spawn(send_response_body(addr, "{\"k\":1}"));
+        let _ = collect_n(rx, 1).await;
+        let (status, body) = send_handle.await.unwrap();
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"], false);
+        assert_eq!(v["code"], 200);
+    }
 
     #[tokio::test]
     async fn http_delivery_failure() {
@@ -1450,6 +1516,7 @@ mod tests {
                 true,
                 EventStatus::Rejected,
                 true,
+                None,
                 None,
                 None,
             )
@@ -1482,6 +1549,7 @@ mod tests {
                 true,
                 EventStatus::Rejected,
                 false,
+                None,
                 None,
                 None,
             )
@@ -1518,6 +1586,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1544,6 +1613,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1568,6 +1638,7 @@ mod tests {
             true,
             EventStatus::Delivered,
             true,
+            None,
             None,
             None,
         )
@@ -1599,6 +1670,7 @@ mod tests {
             true,
             EventStatus::Delivered,
             true,
+            None,
             None,
             None,
         )

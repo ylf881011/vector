@@ -106,6 +106,7 @@ impl SourceConfig for PrometheusPushgatewayConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            false,
         )
     }
 

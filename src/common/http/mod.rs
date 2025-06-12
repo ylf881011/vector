@@ -10,3 +10,12 @@ mod error;
 
 #[cfg(feature = "sources-utils-http-error")]
 pub use error::ErrorMessage;
+
+#[cfg(feature = "sources-utils-http-prelude")]
+mod success;
+
+#[cfg(feature = "sources-utils-http-prelude")]
+pub use success::SuccessResponse;
+
+#[cfg(feature = "sources-utils-http-error")]
+pub use success::ErrorResponse;

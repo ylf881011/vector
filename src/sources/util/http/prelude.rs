@@ -1,4 +1,9 @@
-use crate::common::http::{server_auth::HttpServerAuthConfig, ErrorMessage};
+use crate::common::http::{
+    server_auth::HttpServerAuthConfig,
+    ErrorMessage,
+    SuccessResponse,
+    ErrorResponse,
+};
 use std::{collections::HashMap, convert::Infallible, fmt, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
@@ -12,15 +17,10 @@ use vector_lib::{
     event::{BatchNotifier, BatchStatus, BatchStatusReceiver, Event},
     EstimatedJsonEncodedSizeOf,
 };
-use warp::{
-    filters::{
-        path::{FullPath, Tail},
-        BoxedFilter,
-    },
-    http::{HeaderMap, StatusCode},
-    reject::Rejection,
-    Filter,
-};
+use warp::{filters::{
+    path::{FullPath, Tail},
+    BoxedFilter,
+}, http::{HeaderMap, StatusCode}, reject::Rejection, Filter, Reply};
 
 use crate::{
     config::SourceContext,
@@ -74,6 +74,7 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
         cx: SourceContext,
         acknowledgements: SourceAcknowledgementsConfig,
         keepalive_settings: KeepaliveConfig,
+        response_body: bool,
     ) -> crate::Result<crate::sources::Source> {
         let tls = MaybeTlsSettings::from_config(tls, true)?;
         let protocol = tls.http_protocol_name();
@@ -165,23 +166,41 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
                                 events
                             });
 
-                        handle_request(events, acknowledgements, response_code, cx.out.clone())
+                            handle_request(
+                                events,
+                                acknowledgements,
+                                response_code,
+                                response_body,
+                                cx.out.clone(),
+                            )
                     },
                 );
 
             let ping = warp::get().and(warp::path("ping")).map(|| "pong");
+            
             let routes = svc.or(ping).recover(|r: Rejection| async move {
                 if let Some(e_msg) = r.find::<ErrorMessage>() {
-                    let json = warp::reply::json(e_msg);
-                    Ok(warp::reply::with_status(json, e_msg.status_code()))
-                } else {
-                    //other internal error - will return 500 internal server error
-                    emit!(HttpInternalError {
-                        message: &format!("Internal error: {:?}", r)
-                    });
-                    Err(r)
+                    return Ok(build_error_reply(e_msg));
                 }
+                //other internal error - will return 500 internal server error
+                emit!(HttpInternalError {
+                    message: &format!("Internal error: {:?}", r)
+                });
+                Err(r)
             });
+            
+            // let routes = svc.or(ping).recover(|r: Rejection| async move {
+            //     if let Some(e_msg) = r.find::<ErrorMessage>() {
+            //         let json = warp::reply::json(e_msg);
+            //         Ok(warp::reply::with_status(json, e_msg.status_code()))
+            //     } else {
+            //         //other internal error - will return 500 internal server error
+            //         emit!(HttpInternalError {
+            //             message: &format!("Internal error: {:?}", r)
+            //         });
+            //         Err(r)
+            //     }
+            // });
 
             let span = Span::current();
             let make_svc = make_service_fn(move |conn: &MaybeTlsIncomingStream<TcpStream>| {
@@ -251,6 +270,7 @@ async fn handle_request(
     events: Result<Vec<Event>, ErrorMessage>,
     acknowledgements: bool,
     response_code: StatusCode,
+    response_body: bool,
     mut out: SourceSender,
 ) -> Result<impl warp::Reply, Rejection> {
     match events {
@@ -265,7 +285,7 @@ async fn handle_request(
                     emit!(StreamClosedError { count });
                     warp::reject::custom(RejectShuttingDown)
                 })
-                .and_then(|_| handle_batch_status(response_code, receiver))
+                .and_then(|_| handle_batch_status(response_code, receiver, response_body))
                 .await
         }
         Err(error) => {
@@ -278,11 +298,12 @@ async fn handle_request(
 async fn handle_batch_status(
     success_response_code: StatusCode,
     receiver: Option<BatchStatusReceiver>,
+    response_body: bool,
 ) -> Result<impl warp::Reply, Rejection> {
     match receiver {
-        None => Ok(success_response_code),
+        None => Ok(build_success_reply(success_response_code, response_body)),
         Some(receiver) => match receiver.await {
-            BatchStatus::Delivered => Ok(success_response_code),
+            BatchStatus::Delivered => Ok(build_success_reply(success_response_code, response_body)),
             BatchStatus::Errored => Err(warp::reject::custom(ErrorMessage::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Error delivering contents to sink".into(),
@@ -293,4 +314,36 @@ async fn handle_batch_status(
             ))),
         },
     }
+}
+
+fn build_success_reply(code: StatusCode, body: bool) -> warp::reply::Response {
+    if body {
+        warp::reply::with_status(
+            warp::reply::json(&SuccessResponse {
+                data: serde_json::json!({}),
+                code: code.as_u16(),
+                status: code.as_u16(),
+                msg: "OK".to_string(),
+                error: false,
+            }),
+            code,
+        ).into_response()
+    } else {
+        warp::reply::with_status(warp::reply(), code).into_response()
+    }
+}
+
+fn build_error_reply(err: &ErrorMessage) -> warp::reply::Response {
+    let msg = err.message().to_string();
+    warp::reply::with_status(
+        warp::reply::json(&ErrorResponse {
+            data: serde_json::json!(msg.clone()),
+            code: err.code(),
+            status: err.code(),
+            msg,
+            error: true,
+        }),
+        err.status_code(),
+    )
+    .into_response()
 }
