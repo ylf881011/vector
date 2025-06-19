@@ -468,6 +468,18 @@ impl HttpSource for SimpleHttpSource {
                             socket_addr_to_ip_string(addr),
                         );
                     }
+                    // 增加逻辑：处理 user-agent
+                    if let Some(user_agent) = headers.get("user-agent") {
+                        if let Ok(user_agent_str) = user_agent.to_str() {
+                            log.insert("user_agent", user_agent_str.to_string());
+                        }
+                    }
+                    // 增加逻辑：处理 x-forwarded-for
+                    if let Some(user_agent) = headers.get("x-forwarded-for") {
+                        if let Ok(user_agent_str) = user_agent.to_str() {
+                            log.insert("x_forwarded_for", user_agent_str.to_string());
+                        }
+                    }
                 }
                 _ => {
                     continue;
